@@ -75,7 +75,7 @@ struct limitUpload {
 		//	res.write_string("too large", true, http_status::bad_request);
 		//	return false;
 		//}
-		auto type = req.content_type();
+		auto type = req.get_content_type();
 		if (type == content_type::multipart_form) {
 			res.write_file_view("./www/test.html", true, http_status::bad_request);
 			return false;
@@ -91,6 +91,7 @@ struct limitRequest {
 	bool prehandle(request& req, response& res) {
 		using namespace nonstd::literals;
 		auto id = req.param("id");
+		auto info = req.path_params_list();
 		if (id == "0"_sv) {
 			res.write_file_view("./www/error.html", true, http_status::bad_request);
 			return false;
@@ -124,6 +125,7 @@ int main()
 	server.set_websocket_check_read_alive_time(200);
 	server.set_websocket_check_write_alive_time(200);
 	server.set_defer_write_max_wait_time(10);
+	//server.set_check_session_rate(2);
 	//server.set_max_body_size(3*1024*1024);
 
 	//server.set_upload_path("./myupload");
@@ -139,7 +141,7 @@ int main()
 		});
 
 	server.router<GET>("/sessionrecord", [](request& req, response& res) {
-		auto& session = req.session("test_session0");
+		auto& session = req.session("test_session");
 		session.set_expires(3600);
 		res.write_string("OK");
 		}, init_session{});
@@ -200,10 +202,10 @@ int main()
 		});
 
 	server.router<GET>("/params", [](request& req, response& res) {
-		auto params = req.key_params();
+		auto params = req.pair_params_map();
 		std::cout << "id: " << req.param("id") << std::endl;
 		std::cout << "text: " << req.param("text") << std::endl;
-		std::cout << "all value: " << req.raw_key_params() << std::endl;
+		std::cout << "all value: " << req.pair_params_string() << std::endl;
 		res.write_string("id");
 	});
 
@@ -219,7 +221,7 @@ int main()
 			file_info["key"] = file.first;
 			data["files"].push_back(file_info);
 		}
-		auto& texts = req.multipart_form();
+		auto& texts = req.multipart_form_map();
 		for (auto& iter : texts) {
 			json text_info;
 			text_info["text"] = iter.second;
@@ -249,9 +251,9 @@ int main()
 		});
 
 	server.router<GET, POST>("/pathinfo/*", [](request& req, response& res) {
-		auto raw_param = req.raw_url_params();
+		auto raw_param = req.path_params_string();
 		auto param = req.param(0);
-		auto params = req.url_params();
+		auto params = req.path_params_list();
 		res.write_string("abc");
 	});
 
@@ -359,6 +361,12 @@ int main()
 
 	server.router<GET>("/session", [](request& req, response& res) {
 		auto& session = req.create_session();
+		auto& session0 = req.create_session("a0");
+		auto& session1 = req.create_session("a1");
+		session0.set_expires(30);
+		session1.set_expires(30);
+		session0.set_data("data", 10);
+		session1.set_data("data", 11);
 		session.set_data("time", std::to_string(std::time(nullptr)));
 		session.set_expires(30);
 		res.write_string("OK");
@@ -380,6 +388,10 @@ int main()
 			res.write_string("no");
 		}
 		else {
+			auto& session0 = req.session("a0");
+			auto& session1 = req.session("a1");
+			std::cout << session0.get_data<int>("data") << "\n";
+			std::cout << session1.get_data<int>("data") << "\n";
 			res.write_string("yes");
 		}
 	});
@@ -416,6 +428,8 @@ int main()
 		struct CustomeResult :public response::http_package {
 			CustomeResult(std::string&& content) {
 				body_souce_ = std::move(content);
+			}
+			void dump() {
 				state_ = http_status::ok;
 				write_type_ = response::write_type::string;
 			}
@@ -427,6 +441,8 @@ int main()
 		struct CustomeResult :public response::http_package {
 			CustomeResult(std::string&& content) {
 				body_souce_ = std::move(content);
+			}
+			void dump() {
 				state_ = http_status::ok;
 				write_type_ = response::write_type::file;
 				is_chunked_ = true;
@@ -435,7 +451,36 @@ int main()
 		res.write_http_package(CustomeResult{ "./static/a.mp4" });
 	});
 
+
+	server.router<GET>("/inspect",[](request& req, response& res){
+		res.write_file_view("./swagger-ui-bundle.js");
+	});
+
 	std::shared_ptr<websocket> other_socket;
+
+
+	//websocket_event event;
+	//event.on("message", [](websocket& ws) {
+	//	std::cout << view2str(ws.messages()) << std::endl;
+	//	std::cout << (int)ws.message_code() << std::endl;
+	//	std::string message;
+	//	for (auto i = 0; i <= 18000; ++i) {
+	//		message.append(std::to_string(i) + ",");
+	//	}
+	//	ws.write_string(message, [](bool r,std::error_code const& ec) {
+	//		if (r) {
+	//			std::cout << "write ok\n";
+	//			std::cout<<"ec error: "<<(bool)ec <<" ec message: " << ec.message()<<"\n";
+	//		}
+	//	});
+	//	}).on("open", [&other_socket](websocket& ws) {
+	//		//auto data = ws.get_user_data<std::shared_ptr<std::string>>("tag");
+	//		//other_socket = ws.shared_from_this();
+	//		std::cout << ws.uuid() << " open " <<  std::endl;
+	//	}).on("close", [](websocket& ws) {
+	//			std::cout << ws.uuid() << " close" << std::endl;
+	//	});
+	//		server.router("/ws", event);
 
 	websocket_event event;
 	event.on("message", [](websocket& ws) {
@@ -447,12 +492,31 @@ int main()
 		}
 		ws.write_string(message);
 		}).on("open", [&other_socket](websocket& ws) {
+			auto data = ws.get_user_data<std::shared_ptr<std::string>>("tag");
 			other_socket = ws.shared_from_this();
-			std::cout << ws.uuid() << " open" << std::endl;
+			std::cout << ws.uuid() << " open "<<*data << std::endl;
 		}).on("close", [](websocket& ws) {
 				std::cout << ws.uuid()<< " close" << std::endl;
 		});
-		server.router("/ws", event);
+		server.router("/ws", event, Test {},limitRequest{});
+
+
+		websocket_event eventpath;
+		eventpath.on("message", [](websocket& ws) {
+			std::cout << view2str(ws.messages()) << std::endl;
+			std::cout << (int)ws.message_code() << std::endl;
+			std::string message;
+			for (auto i = 0; i <= 18000; ++i) {
+				message.append(std::to_string(i) + ",");
+			}
+			ws.write_string(message);
+			}).on("open", [&other_socket](websocket& ws) {
+				other_socket = ws.shared_from_this();
+				std::cout << ws.uuid() << " open " << std::endl;
+				}).on("close", [](websocket& ws) {
+					std::cout << ws.uuid() << " close" << std::endl;
+					});
+				server.router("/pathinfo/*", eventpath, limitRequest {});
 
 
 		websocket_event event2;
@@ -501,11 +565,12 @@ int main()
 					std::cout << ws.uuid() << " close" << std::endl;
 					});
 				server.router("/other2", event3);
-
+#ifdef ENABLE_BUILDIN_LOG
 		LOG_INFO << std::string("server start");
+#endif
 
 		//std::thread endth([&server]() {
-		//	std::this_thread::sleep_for(std::chrono::seconds(20));
+		//	std::this_thread::sleep_for(std::chrono::seconds(10));
 		//	server.stop();
 		//});
 		//endth.detach();

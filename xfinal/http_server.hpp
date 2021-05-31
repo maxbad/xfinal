@@ -7,7 +7,9 @@
 #include "http_router.hpp"
 #include "session.hpp"
 #include "message_handler.hpp"
+#ifdef ENABLE_BUILDIN_LOG
 #include "nanolog.hpp"
+#endif
 namespace xfinal {
 	constexpr http_method GET = http_method::GET;
 	constexpr http_method POST = http_method::POST;
@@ -209,13 +211,16 @@ namespace xfinal {
 		std::time_t defer_write_max_wait_time() {
 			return defer_write_max_time_;
 		}
+
 		void init_nanolog(std::string const& log_directory,std::string const& prefix_file_name,std::uint32_t file_roll_size /*MB*/) {
+#ifdef ENABLE_BUILDIN_LOG
 			if (!disable_auto_create_directories_) {
 				if (!log_directory.empty() && !fs::exists(log_directory)) {
 					fs::create_directories(log_directory);
 				}
 			}
 			nanolog::Logger::initialize(nanolog::GuaranteedLogger(), log_directory, prefix_file_name, file_roll_size);
+#endif 
 		}
 	private:
 		bool listen(asio::ip::tcp::resolver::query& query) {
@@ -245,10 +250,13 @@ namespace xfinal {
 			auto method_names = http_method_str<Methods...>::methods_to_name();
 			http_router_.router(url, std::move(method_names), std::forward<Function>(function), std::forward<Args>(args)...);
 		}
-		void router(nonstd::string_view url, websocket_event const& event) {
-			auto url_str = view2str(url);
-			http_router_.websockets_.add_event(url_str, event);
-			http_router_.websocket_router_map_.emplace(url_str, nullptr);
+		template<typename...Args>
+		void router(nonstd::string_view url, websocket_event const& Event, Args&&...args) {
+			std::array<std::string, 1> method = { "WEBSOSCKET" };
+			auto f = [](request& req, response& res) {
+				req.connection().update_websocket();
+			};
+			http_router_.router_ws(url, Event,std::move(f), std::forward<Args>(args)...);
 		}
 	private:
 		void start_acceptor() {

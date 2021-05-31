@@ -6,7 +6,7 @@
 
 1. 统一而简单的接口
 2. header-only
-3. 跨平台
+3. 跨平台（Windows, Linux, Macos）
 4. 支持拦截器功能
 5. 支持session/cookie （持久化,默认保存到磁盘。用户可以自定义持久化介质）
 6. 支持websocket(无锁异步write,高效的数据写出能力) 
@@ -116,6 +116,36 @@ int main()
    serve.run();
 }
 ````
+### request中相关接口介绍
+> request::query
+>> 参数类型为string
+>> 返回值类型为string, 根据索引返回表单提交的值（url-encode-form 和 multipart-form） 
+
+> request::formdata_form_map
+>> 返回通过url-encode-form提交的所有键值对集合
+
+> multipart_form_map
+>> 返回通过multipart-form提交的所有非文件键值对集合
+
+> request::param
+>> 1. 当参数类型为string，返回url中的键值对中key为参数值所对应的值
+>> 2. 当参数类型为std::size_t，返回url中与通配符匹配的对应索引的值
+
+> request::path_params_string
+>> 返回通配符对应的path路径的原始文本  
+
+> request::pair_params_string
+>> 返回URL路径中?后的原始文本  
+
+>request::path_params_list
+>> 返回通配符对应的每一个参数组成的集合 
+
+> request::pair_params_map
+>> 返回URL中？后的参数键值对集合  
+
+>request::raw_url
+>> 返回请求头中URL的原始文本 
+
 ## octet-stream 请求处理
 
 ````cpp
@@ -133,13 +163,13 @@ int main()
 }
 ````
 ## 支持泛化url重载 
-#### 自动路由到最佳匹配url的注册器 
+#### 自动路由到最佳匹配url的注册器 （websocket使用类似）
 >假设注册路由的集合是 { /* , /abc/* , /abc/ccc/* , /abc   }
 >请求示例  
->> 1. url为 http://127.0.0.1:8080/abc/ccc/ddd,则最佳匹配的是 /abc/ccc/* 
->> 2. url为 http://127.0.0.1:8080/abc/cccc/ddd, 则匹配 /abc/* ,  
->> 3. url为 http://127.0.0.1:8080/ddd/kkk,则只匹配 /*
->> 4. url为 http://127.0.0.1:8080/abc,则最佳匹配的就是 /abc
+>> 1. url为 `http://127.0.0.1:8080/abc/ccc/ddd` ,则最佳匹配的是 /abc/ccc/* 
+>> 2. url为 `http://127.0.0.1:8080/abc/cccc/ddd`, 则匹配 /abc/* ,  
+>> 3. url为 `http://127.0.0.1:8080/ddd/kkk`,则只匹配 /*
+>> 4. url为 `http://127.0.0.1:8080/abc`,则最佳匹配的就是 /abc
 ````cpp
 #include <xfinal.hpp>
 using namespace xfinal;
@@ -294,6 +324,8 @@ int main()
 		struct CustomeResult :public response::http_package {
 			CustomeResult(std::string&& content) {
 				body_souce_ = std::move(content);
+			}
+			void dump(){
 				state_ = http_status::ok;
 				write_type_ = response::write_type::string;
 			}
@@ -305,7 +337,9 @@ int main()
 		struct CustomeResult :public response::http_package {
 			CustomeResult(std::string&& content) {
 				body_souce_ = std::move(content);
-				state_ = http_status::ok;
+			}
+			void dump(){
+			  	state_ = http_status::ok;
 				write_type_ = response::write_type::file;
 				is_chunked_ = true;
 			}
@@ -422,6 +456,7 @@ int main()
 }
 ````
 ## xfinal 请求拦截处理
+> 请求body接受前会调用prehandle，返回true则继续处理当前http请求，如果为false则丢弃当前http请求体数据
 ````cpp
 #include <xfinal.hpp>
 using namespace xfinal;
@@ -522,6 +557,7 @@ int main()
 ### 以上所有使用lambda注册的路由 都可以替换成成员函数或controller
 
 # 好用的webscoket
+> 同样支持AOP 和前置拦截器
 ````cpp
 #include <xfinal.hpp>
 int main()
@@ -547,6 +583,11 @@ int main()
 	server.router("/ws", event);  //定义webscoket 路由
 }
 ````
+### webosocket write系列接口
+> 可选最后一个参数，其可调用类型为 void(bool, std::error_code)
+>> 1. 参数1: 是否成功写出
+>> 2. 参数2: 可以获取错误码  
+
 # 功能配置
 >如果没有特殊说明,默认在run方法调用前进行设置
 

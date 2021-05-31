@@ -195,11 +195,14 @@ namespace xfinal {
 				req_.init_url_params();
 				req_.init_content_type();
 				router_type rtype;
-				auto router_iter = router_.pre_router(req_, res_, rtype);
+				auto is_websocket = router_.websokcets().is_websocket(req_);
+				req_.is_websocket_ = is_websocket;
+				auto router_iter = router_.pre_router(req_, res_, rtype, is_websocket);
 				auto&& url_key = router_iter.first;
 				current_router_ = std::move(router_iter.second);
-				if (rtype== router_type::specify || rtype== router_type::general) {
-					auto process_interceptor = router_.get_interceptors_process(url_key, rtype== router_type::general);
+				req_.event_index_str_ = url_key;
+				if (rtype== router_type::specify || rtype== router_type::general || rtype == router_type::ws) {
+					auto process_interceptor = router_.get_interceptors_process(url_key, rtype);
 					if (process_interceptor != nullptr) {
 						auto r = process_interceptor(req_, res_);
 						if (!r) {  //终止此次请求
@@ -220,8 +223,12 @@ namespace xfinal {
 			//http request error;
 		}
 		void handle_read() {  //读取请求头完毕后 开始下一步处理
+			//if (req_.is_websocket()) {  //是websokcet请求
+			//	handle_websocket();  //去处理websocket
+			//	return;
+			//}
 			if (req_.has_body()) {  //has request body
-				auto type = req_.content_type();
+				auto type = req_.get_content_type();
 				switch (type)
 				{
 				case xfinal::content_type::url_encode_form:
@@ -253,14 +260,8 @@ namespace xfinal {
 				break;
 				}
 			}
-			else {  //如果没有body部分 也有可能是websocket
-				auto& wss = router_.websokcets();
-				if (wss.is_websocket(req_)) {  //是websokcet请求
-					handle_websocket();  //去处理websocket
-				}
-				else {  //普通http请求
-					post_router();
-				}
+			else {  //如果没有body部分
+				post_router(); //普通http请求
 			}
 		}
 
@@ -540,10 +541,10 @@ namespace xfinal {
 			post_router();
 		}
 		////处理content_type 为oct-stream 的body数据  --end
-
-		void handle_websocket() { ///websocket 处理
+	public:
+		void update_websocket() { ///websocket 处理
 			router_.websokcets().update_to_websocket(res_);
-			forward_write(true);
+			//forward_write(true);
 		}
 
 	private:
@@ -621,7 +622,7 @@ namespace xfinal {
 		}
 
 		void write() {
-			cancel_defer_waiter();
+			//cancel_defer_waiter();
 			if (need_terminate_request_ == true) {
 				auto it = res_.header_map_.find("Connection");
 				if (it == res_.header_map_.end()) {
@@ -641,7 +642,7 @@ namespace xfinal {
 			if (!socket_close_) {
 				auto handler = this->shared_from_this();
 				start_read_waiter(true);  //开启超时
-				asio::async_write(*socket_, res_.to_buffers(), [handler, is_websokcet,this](std::error_code const& ec, std::size_t write_size) {
+				asio::async_write(*socket_, is_websokcet == false ? res_.to_buffers(): res_.header_to_buffer(), [handler, is_websokcet,this](std::error_code const& ec, std::size_t write_size) {
 					cancel_read_waiter();
 					if (ec) {
 						disconnect();
@@ -657,7 +658,9 @@ namespace xfinal {
 					else {
 						handler->socket_close_ = true; //对于connection来说 sokcet 进行逻辑关闭 http部分处理结束 转交给websocket处理
 						cancel_keep_timer();
-						auto ws = handler->router_.websokcets().start_webscoket(view2str(handler->req_.url()));
+						auto ws = handler->router_.websokcets().start_webscoket(view2str(handler->req_.get_event_index_str()));
+						ws->user_data_ = req_.move_user_data();
+						ws->decode_url_params_ = req_.move_key_params ();
 						ws->move_socket(std::move(handler->socket_));
 					}
 				});
@@ -759,13 +762,15 @@ namespace xfinal {
 		}
 	private:
 		void disconnect() {
-			std::error_code ignore_write_ec;
-			socket_->write_some(asio::buffer("\0\0"), ignore_write_ec);  //solve time_wait problem
-			std::error_code ignore_shutdown_ec;
-			socket_->shutdown(asio::ip::tcp::socket::shutdown_both, ignore_shutdown_ec);
-			std::error_code ignore_close_ec;
-			socket_->close(ignore_close_ec);
-			socket_close_ = true;
+			if(socket_close_== false && socket_ != nullptr){
+				std::error_code ignore_write_ec;
+				socket_->write_some(asio::buffer("\0\0"), ignore_write_ec);  //solve time_wait problem
+				std::error_code ignore_shutdown_ec;
+				socket_->shutdown(asio::ip::tcp::socket::shutdown_both, ignore_shutdown_ec);
+				std::error_code ignore_close_ec;
+				socket_->close(ignore_close_ec);
+				socket_close_ = true;
+			}
 		}
 	private:
 		void reset() {

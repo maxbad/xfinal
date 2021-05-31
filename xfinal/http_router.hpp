@@ -54,14 +54,14 @@ namespace xfinal {
 	template<std::size_t N>
 	struct router_caller {
 		template<typename Function, typename Tuple>
-		constexpr static void apply(bool& b, request& req, response& res, Tuple&& tp) {
+		static void apply(bool& b, request& req, response& res, Tuple&& tp) {
 			each_tuple<0, tuple_size<typename std::remove_reference<Tuple>::type>::value>{}(std::forward<Tuple>(tp), Function{ b,req,res });
 		}
 	};
 	template<>
 	struct router_caller<0> {
 		template<typename Function, typename Tuple>
-		constexpr static void apply(bool& b, request& req, response& res, Tuple&& tp) {
+		static void apply(bool& b, request& req, response& res, Tuple&& tp) {
 			b = true;
 		}
 	};
@@ -157,6 +157,24 @@ namespace xfinal {
 		response& res_;
 	};
 
+	template<typename Methods, typename Function, typename MemberClass>
+	struct fiction_auto_lambda_for_ws {
+		fiction_auto_lambda_for_ws(nonstd::string_view url, Methods methods, Function function, MemberClass* that, websocket_event const& Event):url_(url), methods_(methods), function_(function), that_(that), event_(Event){
+
+		}
+		template<typename T>
+		void operator()(T&& tp) {
+			auto b = std::bind(&MemberClass::template pre_handler<Function, typename std::remove_reference<T>::type>, that_, std::placeholders::_1, std::placeholders::_2, function_, tp);
+			auto str = that_->reg_router(url_, methods_, std::move(b), std::get<1>(tp));
+			that_->websockets_.add_event(methods_[0]+ str, event_);
+		}
+		nonstd::string_view url_;
+		Methods methods_;
+		Function function_;
+		MemberClass* that_;
+		websocket_event const& event_;
+	};
+
 	template<typename Methods,typename Function,typename MemberClass>
 	struct fiction_auto_lambda_in_router0 {
 		fiction_auto_lambda_in_router0(nonstd::string_view url,Methods methods, Function function, MemberClass* that):url_(url),methods_(methods), function_(function), that_(that){
@@ -222,6 +240,8 @@ namespace xfinal {
 		friend struct fiction_auto_lambda_in_router1;
 		template<typename Methods, typename Function, typename ClassType, typename MemberClass>
 		friend struct fiction_auto_lambda_in_router2;
+		template<typename Methods, typename Function, typename MemberClass>
+		friend struct fiction_auto_lambda_for_ws;
 	public:
 		using router_function = std::function<void(request&, response&)>;
 		using interceptor_function = std::function<bool(request&, response&)>;
@@ -229,14 +249,16 @@ namespace xfinal {
 		http_router() :timer_(io_), websocket_hub_instance_(websocket_hub::get()){
 		}
 		~http_router() {
+			std::error_code ignore_err;
+			timer_.cancel(ignore_err);
 			io_.stop();
-			if (thread_->joinable()) {
+			if (thread_!=nullptr && thread_->joinable()) {
 				thread_->join();
 			}
 			websocket_hub_instance_.end_thread_ = true;
 			websocket_hub_instance_.add({ nullptr,nullptr });
 			websocket_hub_instance_.condtion_.notify_all();
-			if (websocket_hub_thread_->joinable()) {
+			if (websocket_hub_thread_!=nullptr && websocket_hub_thread_->joinable()) {
 				websocket_hub_thread_->join();
 			}
 		}
@@ -255,7 +277,7 @@ namespace xfinal {
 		}
 	private:
 		template<typename Array, typename Bind,typename Interceptor>
-		void reg_router(nonstd::string_view url, Array&& methods, Bind&& router, Interceptor&& interceptors) {
+		std::string reg_router(nonstd::string_view url, Array&& methods, Bind&& router, Interceptor&& interceptors) {
 			auto interceptor_pre_process = [interceptors](request& req,response& res) mutable ->bool  {
 				using tupleType = typename std::remove_reference<decltype(interceptors)>::type;
 				bool result = true;
@@ -264,19 +286,23 @@ namespace xfinal {
 			};
 			auto generator = url.find('*');
 			if (generator == nonstd::string_view::npos) {
+				auto url_str = std::string(url.data(), url.size());
 				for (auto& iter : methods) {
-					std::string key = iter + std::string(url.data(), url.size());
+					std::string key = iter + url_str;
 					router_map_.insert(std::make_pair(key, static_cast<router_function>(router)));
 					interceptor_map_.insert(std::make_pair(key, static_cast<interceptor_function>(interceptor_pre_process)));
 				}
+				return url_str;
 			}
 			else {
 				auto url_ = url.substr(0, generator - 1);
+				auto url_str = std::string(url_.data(), url_.size());
 				for (auto& iter : methods) {
-					std::string key = iter + std::string(url_.data(), url_.size());
+					std::string key = iter + url_str;
 					genera_router_map_.insert(std::make_pair(key, static_cast<router_function>(router)));
 					genera_interceptor_map_.insert(std::make_pair(key, static_cast<interceptor_function>(interceptor_pre_process)));
 				}
+				return url_str;
 			}
 		}
 
@@ -319,6 +345,14 @@ namespace xfinal {
 		template<typename Array, typename Class, typename Object, typename...Args>
 		typename std::enable_if<std::is_base_of<Controller, Class>::value>::type router(nonstd::string_view url, Array&& methods, void(Class::* memberfunc)(), Object* that, Args&& ...args) {  //controller with object pointer
 			fiction_auto_lambda_in_router2< Array, void(Class::*)(), Class, http_router> callable(url, std::forward<Array>(methods), memberfunc, static_cast<Object*>(that), this);
+			reorganize_tuple_v1(callable, std::tuple<>{}, std::tuple<>{}, std::tuple<>{}, std::forward<Args>(args)...);
+		}
+
+		// ws router
+		template<typename Function,typename...Args>
+		void router_ws(nonstd::string_view url, websocket_event const& Event, Function&& lambda, Args&&...args) {
+			std::array<std::string, 1> method = { "WEBSOSCKET" };
+			fiction_auto_lambda_for_ws<std::array<std::string, 1>, Function, http_router> callable(url, std::forward<std::array<std::string, 1>>(method), std::forward<Function>(lambda), this, Event);
 			reorganize_tuple_v1(callable, std::tuple<>{}, std::tuple<>{}, std::tuple<>{}, std::forward<Args>(args)...);
 		}
 
@@ -425,7 +459,7 @@ namespace xfinal {
 		//		file.remove();
 		//	}
 		//}
-		std::pair<std::string,router_function> pre_router(request& req, response& res, router_type& rtype) const {
+		std::pair<std::string,router_function> pre_router(request& req, response& res, router_type& rtype,bool is_websocket = false) const {
 			auto url = req.url();
 			if (url.size() > 1) {  //确保这里不是 / 根路由
 				std::size_t back = 0;
@@ -437,7 +471,7 @@ namespace xfinal {
 				}
 			}
 			auto url_str = view2str(url);
-			auto key = view2str(req.method()) + url_str;
+			auto key = is_websocket==false?view2str(req.method()) + url_str:"WEBSOSCKET"+ url_str;
 			auto&& common_iter = router_map_.find(key);
 			if (common_iter != router_map_.end()) {
 				//auto& it = router_map_.at(key);
@@ -473,7 +507,7 @@ namespace xfinal {
 				auto wb_iter = websocket_router_map_.find(url_str);
 				if (wb_iter != websocket_router_map_.end()) {
 					rtype = router_type::ws;
-					return { url_str ,nullptr };
+					return std::pair<std::string,router_function>{ url_str ,nullptr };
 				}
 			}
 			//if (req.content_type() == content_type::multipart_form) {
@@ -488,10 +522,10 @@ namespace xfinal {
 			//}
 			rtype = router_type::unknow;
 			if (not_found_callback_ != nullptr) {
-				return { "",not_found_callback_ };
+				return std::pair<std::string,router_function>{ "",not_found_callback_ };
 			}
 			else {
-				return { "",[](request& req, response& res) {
+				return std::pair<std::string,router_function>{ "",[](request& req, response& res) {
 					std::stringstream ss;
 					ss << "the request " << view2str(req.method()) << " \"" << view2str(req.url()) << "\" is not found";
 					res.write_string(ss.str(), false, http_status::bad_request);
@@ -499,16 +533,22 @@ namespace xfinal {
 			}
 		}
 	public:
-		interceptor_function get_interceptors_process(std::string const& key,bool is_general) const {
-			if (!is_general) {
+		interceptor_function get_interceptors_process(std::string const& key, router_type type) const {
+			if (type == router_type::specify) {
 				auto iter = interceptor_map_.find(key);
 				if (iter != interceptor_map_.end()) {
 					return iter->second;
 				}
 			}
-			else {
+			else if(type == router_type::general){
 				auto iter = genera_interceptor_map_.find(key);
 				if (iter != genera_interceptor_map_.end()) {
+					return  iter->second;
+				}
+			}
+			else if (type == router_type::ws) {
+				auto iter = websocket_interceptor_map_.find(key);
+				if (iter != websocket_interceptor_map_.end()) {
 					return  iter->second;
 				}
 			}
@@ -530,6 +570,9 @@ namespace xfinal {
 		void check_session_expires() {
 			timer_.expires_from_now(std::chrono::seconds(check_session_time_));
 			timer_.async_wait([this](std::error_code const& ec) {
+				if (ec) {
+					return;
+				}
 				session_manager<class session>::get().check_expires();
 				check_session_expires();
 			});
@@ -551,6 +594,7 @@ namespace xfinal {
 		std::unordered_map<std::string, interceptor_function> interceptor_map_;
 		std::unordered_map<std::string, interceptor_function> genera_interceptor_map_;
 		std::unordered_map<std::string, router_function> websocket_router_map_;
+		std::unordered_map<std::string, interceptor_function> websocket_interceptor_map_;
 		std::unordered_map<std::string, std::pair<std::size_t, inja::CallbackFunction>> view_method_map_;
 		asio::io_service io_;
 		asio::steady_timer timer_;

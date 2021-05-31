@@ -72,10 +72,11 @@ namespace xfinal {
 		nonstd::string_view url() const noexcept {
 			auto it = url_.rfind('?');
 			if (it != (nonstd::string_view::size_type)nonstd::string_view::npos) {
-				bool r = is_key_params(url_.substr(it + 1));
-				if (r) {
-					return url_.substr(0, it);
-				}
+				// bool r = is_key_params(url_.substr(it + 1));
+				// if (r) {
+				// 	return url_.substr(0, it);
+				// }
+				return url_.substr(0, it);
 			}
 			return url_;
 		}
@@ -103,7 +104,7 @@ namespace xfinal {
 			return "";
 		}
 
-		nonstd::string_view raw_url_params() const noexcept {  //获取url参数字符串
+		nonstd::string_view path_params_string() const noexcept {  //获取url参数字符串
 			if (is_generic_) {
 				auto pos = generic_base_path_.size();
 				auto url_fix = url();
@@ -116,7 +117,7 @@ namespace xfinal {
 			return "";
 		}
 
-		nonstd::string_view raw_key_params() const noexcept {  //获取问号后的参数字符串
+		nonstd::string_view pair_params_string() const noexcept {  //获取问号后的参数字符串
 			auto it = url_.rfind('?');
 			auto view = url_.substr(it + 1);
 			if (it != (nonstd::string_view::size_type)nonstd::string_view::npos) {
@@ -129,7 +130,7 @@ namespace xfinal {
 			return "";
 		}
 
-		std::vector<nonstd::string_view> url_params() const noexcept {  //获取url类型参数的数组
+		std::vector<nonstd::string_view> path_params_list() const noexcept {  //获取url类型参数的数组
 			if (is_generic_) {
 				auto pos = generic_base_path_.size();
 				auto url_fix = url();
@@ -140,10 +141,10 @@ namespace xfinal {
 				auto vec = split(parms, "/");
 				return vec;
 			}
-			return {};
+			return std::vector<nonstd::string_view>{};
 		}
 
-		std::map<std::string, std::string> key_params() const noexcept { //获取问号键值对的map
+		std::map<std::string, std::string> pair_params_map() const noexcept { //获取问号键值对的map
 			return decode_url_params_;
 		}
 
@@ -151,6 +152,10 @@ namespace xfinal {
 
 		nonstd::string_view raw_url()  const noexcept {
 			return url_;
+		}
+
+		bool is_websocket() {
+			return is_websocket_;
 		}
 
 		//template<typename T>
@@ -206,7 +211,7 @@ namespace xfinal {
 			return version_;
 		}
 
-		enum content_type content_type() const noexcept {
+		enum content_type get_content_type() const noexcept {
 			return content_type_;
 		}
 
@@ -250,16 +255,20 @@ namespace xfinal {
 		//	}
 		//}
 
-		std::map<std::string, std::string> const& url_form() const noexcept {
+		std::map<std::string, std::string> const& formdata_form_map() const noexcept {
 			return decode_form_map_;
 		}
 
-		std::map<std::string, std::string> const& multipart_form() const noexcept {
+		std::map<std::string, std::string> const& multipart_form_map() const noexcept {
 			return *multipart_form_map_;
 		}
 
 		nonstd::string_view body() const noexcept {
 			return body_;
+		}
+
+		std::string get_event_index_str() {
+			return event_index_str_;
 		}
 
 		bool accept_range(std::int64_t& startpos, std::int64_t& endpos) {
@@ -321,57 +330,70 @@ namespace xfinal {
 		class session& create_session() {
 			return create_session("XFINAL");
 		}
-		class session& create_session(std::string const& name) {
-			session_ = std::make_shared<class session>(false);
-			session_->get_cookie().set_name(name);
-			session_->init_id(uuids::uuid_system_generator{}().to_short_str());
+		class session& create_session(std::string const& name,bool overlay = true) {
+			auto it = sessions_.find(name);
+			if (overlay == false && it != sessions_.end()) {
+				return *(it->second);
+			}
+			auto session = std::make_shared<class session>(false);
+			session->get_cookie().set_name(name);
+			session->init_id(uuids::uuid_system_generator{}().to_short_str());
 			//session_->set_expires(600);
-			session_manager<class session>::get().add_session(session_->get_id(), session_);
-			return *session_;
+			session_manager<class session>::get().add_session(session->get_id(), session);
+			if (it != sessions_.end()) {
+				it->second = session;
+			}
+			else {
+				sessions_.insert(std::make_pair(name, session));
+			}
+			return *session;
 		}
 
 		class session& session(std::string const& name) {
-			if (session_ != nullptr && !session_->empty()) {
-				auto cookie_name = session_->get_cookie().name();
+			auto it = sessions_.find(name);
+			if (it!= sessions_.end() && it->second != nullptr) {
+				auto cookie_name = it->second->get_cookie().name();
 				if (cookie_name == name) {
-					return *session_;
+					return *(it->second);
 				}
 			}
 			auto cookies_value = header("cookie");
 			auto name_view = nonstd::string_view{ name.data(),name.size() };
-			auto it = cookies_value.find(name_view);
-			if (it == (nonstd::string_view::size_type)nonstd::string_view::npos) {
-				session_ = session_manager<class session>::get().empty_session();
+			auto it_view = cookies_value.find(name_view);
+			std::shared_ptr<class session> session;
+			if (it_view == (nonstd::string_view::size_type)nonstd::string_view::npos) {
+				session = session_manager<class session>::get().empty_session();
 			}
 			else {
-				auto pos = it + name.size() + 1;
+				auto pos = it_view + name.size() + 1;
 				auto dot_pos = cookies_value.find(';', pos);
 				auto id = dot_pos != (nonstd::string_view::size_type)nonstd::string_view::npos ? cookies_value.substr(pos, dot_pos - pos) : cookies_value.substr(pos, cookies_value.size() - pos);
 				if (id.empty()) {
-					session_ = session_manager<class session>::get().empty_session();
+					session = session_manager<class session>::get().empty_session();
 				}
 				else {
-					session_ = session_manager<class session>::get().validata(view2str(id));//验证session的有效性并返回
+					session = session_manager<class session>::get().validata(view2str(id));//验证session的有效性并返回
 				}
 			}
-			return *session_;
+			sessions_.insert(std::make_pair(name, session));
+			return *session;
 		}
 		class session& session() {
 			return session("XFINAL");
 		}
 
-		void set_session(std::weak_ptr<class session> weak) {
-			auto handler = weak.lock();
-			if (handler != nullptr) {
-				session_ = handler;
-				session_manager<class session>::get().add_session(handler->get_id(), handler);
-			}
-		}
+		//void set_session(std::weak_ptr<class session> weak) {
+		//	auto handler = weak.lock();
+		//	if (handler != nullptr) {
+		//		session_ = handler;
+		//		session_manager<class session>::get().add_session(handler->get_id(), handler);
+		//	}
+		//}
 
-		class session& session_by_id(std::string const& sessionId) {
-			session_ = session_manager<class session>::get().validata(sessionId);//验证session的有效性并返回
-			return *session_;
-		}
+		//class session& session_by_id(std::string const& sessionId) {
+		//	session_ = session_manager<class session>::get().validata(sessionId);//验证session的有效性并返回
+		//	return *session_;
+		//}
 
 		class session_manager<class session>& get_session_manager() {
 			return session_manager<class session>::get();
@@ -424,6 +446,7 @@ namespace xfinal {
 		}
 	private:
 		void reset() {
+			event_index_str_.clear();
 			method_ = "";
 			url_ = "";
 			version_ = "";
@@ -438,12 +461,21 @@ namespace xfinal {
 			boundary_key_ = "";
 			is_generic_ = false;
 			generic_base_path_ = "";
-			session_ = nullptr;
+			//session_ = nullptr;
+			sessions_.clear();
+			is_websocket_ = false;
 			user_data_.clear();
 		}
 		void set_generic_path(std::string const& path) {
 			is_generic_ = true;
 			generic_base_path_ = path;
+		}
+
+		std::map<std::string, nonstd::any>&& move_user_data() {
+			return std::move(user_data_);
+		}
+		std::map<std::string, std::string>&& move_key_params () {
+			return std::move (decode_url_params_);
 		}
 	private:
 		nonstd::string_view method_;
@@ -465,10 +497,13 @@ namespace xfinal {
 		xfinal::XFile* oct_steam_ = nullptr;
 		xfinal::XFile* empty_file_ = nullptr;
 		class connection* connecter_;
-		std::shared_ptr<class session> session_;
+		//std::shared_ptr<class session> session_;
+		std::map<std::string, std::shared_ptr<class session>> sessions_;
 		bool is_generic_ = false;
 		std::string generic_base_path_;
 		std::map<std::string, nonstd::any> user_data_;
+		bool is_websocket_ = false;
+		std::string event_index_str_;
 	};
 	///响应
 	template<typename Connection>
@@ -480,9 +515,15 @@ namespace xfinal {
 		}
 	public:
 		~defer_guarder() {
+			conn_->cancel_defer_waiter();
 			if (conn_ != nullptr) {
 				conn_->do_after();
-				conn_->write(); //回应请求
+				if (!conn_->req_.is_websocket()) {
+					conn_->write(); //回应请求
+				}
+				else {
+					conn_->forward_write(true); //websocket
+				}
 			}
 		}
 		std::shared_ptr<Connection> operator ->() {
@@ -509,9 +550,10 @@ namespace xfinal {
 	public:
 		class http_package {
 			friend class response;
-		protected:
+		public:
 			http_package() = default;
 			virtual ~http_package() = default;
+			virtual void dump() = 0;
 		protected:
 			http_status state_ = http_status::init;
 			std::unordered_multimap<std::string, std::string> header_map_;
@@ -648,7 +690,7 @@ namespace xfinal {
 			try {
 				write_string(json.dump(), is_chunked, http_status::ok, "application/json");
 			}
-			catch (json::type_error const& ec) {
+			catch (std::exception const& ec) {
 				write_string(ec.what(), false, http_status::bad_request);
 			}
 		}
@@ -657,7 +699,7 @@ namespace xfinal {
 			try {
 				write_string(std::move(json), is_chunked, http_status::ok, "application/json");
 			}
-			catch (json::type_error const& ec) {
+			catch (std::exception const& ec) {
 				write_string(ec.what(), false, http_status::bad_request);
 			}
 		}
@@ -675,7 +717,7 @@ namespace xfinal {
 			try {
 				write_string(view_env_->render_file(filename, view_data_), is_chunked, state, extension);
 			}
-			catch (std::runtime_error const& ec) {
+			catch (std::exception const& ec) {
 				write_string(ec.what(), false, http_status::bad_request);
 			}
 		}
@@ -689,7 +731,7 @@ namespace xfinal {
 			try {
 				write_string(view_env_->render(data, view_data_), is_chunked, state, content_type);
 			}
-			catch (std::runtime_error const& ec) {
+			catch (std::exception const& ec) {
 				write_string(ec.what(), false, http_status::bad_request);
 			}
 		}
@@ -700,6 +742,7 @@ namespace xfinal {
 		}
 
 		void write_http_package(http_package&& package) {
+			package.dump();
 			for (auto& iter : package.header_map_) {
 				if (!exist_header(iter.first)) {
 					add_header(iter.first, iter.second);
@@ -753,6 +796,22 @@ namespace xfinal {
 			return T{};
 		}
 	private:
+		void write_sessions_to_client() {
+			auto&& map = req_.sessions_;
+			for (auto it = map.begin(); it != map.end(); ++it) {
+				auto&& session = it->second;
+				if ((session != nullptr) && !(session->empty())) {  //是否有session
+					if (session->cookie_update()) {
+						add_header("Set-Cookie", session->cookie_str());
+					}
+					if (session->cookie_update() || session->data_update()) {
+						session->save(session_manager<class session>::get().get_storage()); //保存到存储介质
+						session->set_data_update(false);
+					}
+					session->set_cookie_update(false);
+				}
+			}
+		}
 		std::vector<asio::const_buffer> header_to_buffer() noexcept {
 			std::vector<asio::const_buffer> buffers_;
 			add_header("server", "xfinal");//增加服务器标识
@@ -762,16 +821,7 @@ namespace xfinal {
 			http_version_ = view2str(req_.http_version()) + ' ';//写入回应状态行 
 			buffers_.emplace_back(asio::buffer(http_version_));
 			buffers_.emplace_back(http_state_to_buffer(state_));
-			if ((req_.session_ != nullptr) && !(req_.session_->empty())) {  //是否有session
-				if (req_.session_->cookie_update()) {
-					add_header("Set-Cookie", req_.session_->cookie_str());
-				}
-				if (req_.session_->cookie_update() || req_.session_->data_update()) {
-					req_.session_->save(session_manager<class session>::get().get_storage()); //保存到存储介质
-					req_.session_->set_data_update(false);
-				}
-				req_.session_->set_cookie_update(false);
-			}
+			write_sessions_to_client(); //sessions 写入客户端
 			for (auto& iter : header_map_) {  //回写响应头部
 				buffers_.emplace_back(asio::buffer(iter.first));
 				buffers_.emplace_back(asio::buffer(name_value_separator.data(), name_value_separator.size()));
@@ -791,6 +841,7 @@ namespace xfinal {
 		}
 
 		std::tuple<bool, std::vector<asio::const_buffer>> chunked_body() noexcept {
+			using return_type = std::tuple<bool, std::vector<asio::const_buffer>>;
 			std::vector<asio::const_buffer> buffers;
 			switch (write_type_) {
 			case write_type::string: //如果是文本数据
@@ -802,7 +853,7 @@ namespace xfinal {
 					buffers.emplace_back(asio::buffer(crlf.data(), crlf.size()));
 					buffers.emplace_back(asio::buffer(&body_[(std::size_t)init_start_pos_], left_size));
 					buffers.emplace_back(asio::buffer(crlf.data(), crlf.size()));
-					return { true, buffers };
+					return return_type{ true, buffers };
 				}
 				else {  //还有超过每次chunked传输的数据大小
 					chunked_write_size_ = to_hex(chunked_size_);
@@ -811,7 +862,7 @@ namespace xfinal {
 					buffers.emplace_back(asio::buffer(&body_[(std::size_t)init_start_pos_], (std::size_t)chunked_size_));
 					buffers.emplace_back(asio::buffer(crlf.data(), crlf.size()));
 					init_start_pos_ = init_start_pos_ + chunked_size_;
-					return { false,buffers };
+					return return_type{ false,buffers };
 				}
 			}
 			break;
@@ -835,11 +886,11 @@ namespace xfinal {
 				buffers.emplace_back(asio::buffer(crlf.data(), crlf.size()));
 				init_start_pos_ = -1;  //下一次就不需要在重新定位文件
 				init_end_pos_ = -1;
-				return { eof,buffers };
+				return return_type{ eof,buffers };
 			}
 			break;
 			default:
-				return { true,buffers };
+				return return_type{ true,buffers };
 				break;
 			}
 		}

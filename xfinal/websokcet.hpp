@@ -28,6 +28,8 @@ namespace xfinal {
 	class websocket;
 	template<typename T>
 	void close_ws(websocket& ws);
+
+	inline void close_ws_with_notification(websocket& ws);
 	class websocket_event final {
 		friend class websockets;
 	public:
@@ -81,6 +83,14 @@ namespace xfinal {
 				websockets_.erase(it);
 			}
 		}
+		~websocket_event_map() {
+			map_mutex_.lock();
+			auto copy_sockets = websockets_;
+			map_mutex_.unlock();
+			for (auto&& wsocket : copy_sockets) {
+				close_ws_with_notification(*wsocket.second);
+			}
+		}
 	private:
 		std::mutex map_mutex_;
 		std::unordered_map<std::string, websocket_event> events_;
@@ -90,6 +100,7 @@ namespace xfinal {
 	struct send_message {
 		std::shared_ptr<websocket> websocket_;
 		std::shared_ptr<std::queue<std::shared_ptr<std::string>>> message_queue;
+		std::shared_ptr<std::function<void(bool, std::error_code)>> write_callback;
 	};
 
 	inline void send_to_hub(send_message const&);
@@ -113,9 +124,13 @@ namespace xfinal {
 		asio::ip::tcp::socket& socket() {
 			return *socket_;
 		}
+		std::map<std::string, std::string> key_params () const noexcept {
+			return decode_url_params_;
+		}
 	private:
 		void move_socket(std::unique_ptr<asio::ip::tcp::socket>&& socket) {
 			socket_ = std::move(socket);
+			socket = nullptr;
 			socket_is_open_ = true;
 			auto& io = static_cast<asio::io_service&>(socket_->get_executor().context());
 			wait_read_timer_ = std::move(std::unique_ptr<asio::steady_timer>(new asio::steady_timer(io)));
@@ -203,7 +218,7 @@ namespace xfinal {
 		//	write_frame();
 		//}
 
-		void write(std::string const& message, unsigned char opcode) {
+		void write(std::string const& message, unsigned char opcode, std::function<void(bool, std::error_code)> const& call_back) {
 			auto message_size = message.size();
 			if (message_size == 0) {
 				return;
@@ -266,15 +281,15 @@ namespace xfinal {
 				}
 			}
 			/*write_frame();*/
-			send_message send_msg = { this->shared_from_this() ,write_queue };
+			send_message send_msg = { this->shared_from_this() ,write_queue,std::shared_ptr<std::function<void(bool,std::error_code)>>(new std::function<void(bool,std::error_code)>{call_back}) };
 			send_to_hub(send_msg);
 		}
 	public:
-		void write_string(std::string const& message) {
-			write(message, 1);
+		void write_string(std::string const& message,std::function<void(bool,std::error_code)> const& call_back = nullptr) {
+			write(message, 1, call_back);
 		}
-		void write_binary(std::string const& message) {
-			write(message, 2);
+		void write_binary(std::string const& message, std::function<void(bool, std::error_code)> const& call_back = nullptr) {
+			write(message, 2, call_back);
 		}
 		template<typename T>
 		void set_user_data(std::string const& key,std::shared_ptr<T> const& value){
@@ -376,7 +391,7 @@ namespace xfinal {
 				return;
 			}
 			if (frame_info_.opcode == 9) {  //ping
-				write("", 10);  //回应客户端心跳
+				write("", 10,nullptr);  //回应客户端心跳
 				return;
 			}
 			if (frame_info_.opcode == 10) {  //pong
@@ -444,6 +459,17 @@ namespace xfinal {
 			}
 		}
 		void read_data() {
+			if (frame_info_.payload_length == 0) {  //没有数据需要读取
+				if (frame_info_.eof) {
+					message_ = std::string();
+					buffers_.resize(0);
+					data_current_pos_ = 0;
+					//数据帧都处理完整 回调
+					websocket_event_manager.trigger(url_, "message", *this);
+				}
+				start_read();
+				return;
+			}
 			expand_buffer(frame_info_.payload_length);
 			auto handler = this->shared_from_this();
 			start_read_timeout();
@@ -554,6 +580,7 @@ namespace xfinal {
 		std::atomic_bool socket_is_open_{ false };
 		std::atomic_bool is_writing_{ false };
 		std::map<std::string, nonstd::any> user_data_;
+		std::map<std::string, std::string> decode_url_params_;
 	};
 
 	class websocket_hub {
@@ -578,22 +605,28 @@ namespace xfinal {
 			websocket->close();
 		}
 	private:
-		void write_frame(std::shared_ptr<websocket> const& websocket, std::shared_ptr<std::queue<std::shared_ptr<std::string>>> const& frame_queue) const {
+		void write_frame(std::shared_ptr<websocket> const& websocket, std::shared_ptr<std::queue<std::shared_ptr<std::string>>> const& frame_queue, std::shared_ptr<std::function<void(bool, std::error_code)>> const& call_back) const {
 			if (frame_queue->empty() || !websocket->is_open()) {
 				write_ok(websocket);
+				if (call_back != nullptr && *call_back != nullptr) {
+					(*call_back)(true, std::error_code{});
+				}
 				return;
 			}
 			auto a_frame = frame_queue->front();
 			frame_queue->pop();
 			auto buff = asio::buffer(a_frame->data(), a_frame->size());
 			websocket->start_write_timeout();
-			asio::async_write(*websocket->socket_, buff, [websocket, a_frame, frame_queue, this](std::error_code const& ec, std::size_t size) {
+			asio::async_write(*websocket->socket_, buff, [websocket, a_frame, frame_queue, this, call_back](std::error_code const& ec, std::size_t size) {
 				websocket->cancel_write_time();
 				if (ec) {
 					close_socket(websocket);
+					if (call_back != nullptr && *call_back != nullptr) {
+						(*call_back)(false, ec);
+					}
 					return;
 				}
-				write_frame(websocket, frame_queue);
+				write_frame(websocket, frame_queue, call_back);
 			});
 		}
 	private:
@@ -610,9 +643,10 @@ namespace xfinal {
 				message_list_.pop_front();
 				auto websocket = one.websocket_;
 				auto message = one.message_queue;
+				auto write_callback = one.write_callback;
 				if (websocket->socket_is_open_ == true && websocket->is_writing_ == false) {
 					websocket->is_writing_ = true;
-					write_frame(websocket, message);
+					write_frame(websocket, message, write_callback);
 				}
 				else if (websocket->socket_is_open_ == true && websocket->is_writing_ == true) {
 					message_list_.push_back(one);
@@ -636,6 +670,10 @@ namespace xfinal {
 	void close_ws(websocket& ws)
 	{
 		ws.null_close();
+	}
+
+	void close_ws_with_notification(websocket& ws) {
+		ws.close();
 	}
 
 
